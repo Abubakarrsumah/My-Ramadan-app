@@ -1,136 +1,134 @@
 import streamlit as st
 import requests
 import random
-import json
-import os
+import pandas as pd
 from datetime import datetime
 
-# --- CONFIGURATION & STYLING ---
+# --- APP CONFIGURATION ---
 st.set_page_config(page_title="Ramadan Coach 2026", page_icon="🌙", layout="wide")
 
+# --- USER SETTINGS: GOOGLE SHEETS ---
+# Replace with your actual Sheet ID from the URL
+SHEET_ID = "YOUR_GOOGLE_SHEET_ID_HERE" 
+SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv"
+
+# --- CUSTOM STYLING ---
 st.markdown("""
     <style>
-    .arabic-text { font-family: 'Amiri', serif; font-size: 32px; direction: rtl; text-align: right; color: #1B5E20; line-height: 2; padding: 10px; }
-    .translation-text { font-size: 18px; color: #444; margin-bottom: 20px; }
-    .prayer-card { background-color: #e8f5e9; padding: 10px; border-radius: 8px; margin-bottom: 5px; border-right: 5px solid #2E7D32; }
-    .vocab-card { border: 1px solid #ddd; border-radius: 10px; padding: 15px; text-align: center; background-color: #fafafa; }
+    .arabic-text { font-family: 'Amiri', serif; font-size: 34px; direction: rtl; text-align: right; color: #1B5E20; line-height: 2.2; }
+    .translation-text { font-size: 18px; color: #444; margin-bottom: 25px; border-left: 3px solid #eee; padding-left: 15px; }
+    .prayer-card { background-color: #f1f8e9; padding: 15px; border-radius: 10px; border-right: 6px solid #2E7D32; margin-bottom: 10px; }
+    .vocab-card { border: 1px solid #e0e0e0; border-radius: 12px; padding: 15px; background-color: #ffffff; text-align: center; box-shadow: 2px 2px 5px rgba(0,0,0,0.05); }
     </style>
     """, unsafe_allow_html=True)
 
-# --- PROGRESS TRACKER LOGIC ---
-PROGRESS_FILE = "quran_progress.json"
-
-def load_progress():
-    if os.path.exists(PROGRESS_FILE):
-        with open(PROGRESS_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_progress(surah_name):
-    progress = load_progress()
-    progress[surah_name] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    with open(PROGRESS_FILE, "w") as f:
-        json.dump(progress, f)
-
-# --- SIDEBAR: PRAYERS & TRACKER ---
-with st.sidebar:
-    st.title("📍 Your Ramadan Hub")
-    city = st.text_input("City", "Kabala")
-    country = st.text_input("Country", "Sierra Leone")
-    
+# --- FUNCTIONS ---
+def get_prayer_times(city, country):
     try:
-        p_res = requests.get(f"https://api.aladhan.com/v1/timingsByCity?city={city}&country={country}&method=2").json()
-        t = p_res['data']['timings']
-        st.subheader("Prayer Times")
-        st.markdown(f"<div class='prayer-card'><b>Fajr (Suhoor Ends):</b> {t['Fajr']}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='prayer-card'><b>Dhuhr:</b> {t['Dhuhr']}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='prayer-card'><b>Asr:</b> {t['Asr']}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='prayer-card' style='background-color:#ffebee;'><b>Maghrib (Iftar):</b> {t['Maghrib']}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='prayer-card'><b>Isha:</b> {t['Isha']}</div>", unsafe_allow_html=True)
+        url = f"https://api.aladhan.com/v1/timingsByCity?city={city}&country={country}&method=2"
+        res = requests.get(url).json()
+        return res['data']['timings']
     except:
-        st.warning("Please check city/country spelling.")
+        return None
 
+def load_google_progress():
+    try:
+        return pd.read_csv(SHEET_URL)
+    except:
+        return pd.DataFrame(columns=["Surah", "Date"])
+
+# --- SIDEBAR: KABALA HUB ---
+with st.sidebar:
+    st.title("🕌 My Ramadan Hub")
+    city = st.text_input("Current City", "Kabala")
+    
+    times = get_prayer_times(city, "Sierra Leone")
+    if times:
+        st.subheader(f"📅 Prayer Times ({city})")
+        st.markdown(f"<div class='prayer-card'>🚩 <b>Fajr (Suhoor Ends):</b> {times['Fajr']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='prayer-card'>☀️ <b>Dhuhr:</b> {times['Dhuhr']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='prayer-card'>🌥️ <b>Asr:</b> {times['Asr']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='prayer-card' style='background-color:#fff3e0;'>🌙 <b>Maghrib (Iftar):</b> {times['Maghrib']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='prayer-card'>🌌 <b>Isha:</b> {times['Isha']}</div>", unsafe_allow_html=True)
+        
+        st.info(f"🔔 **Notification:** Set your IFTTT alarm to {times['Fajr']} minus 30 minutes!")
+    
     st.divider()
-    st.subheader("📊 Reading Progress")
-    history = load_progress()
-    if history:
-        for s, d in history.items():
-            st.caption(f"✅ {s} (Completed: {d})")
-    else:
-        st.write("No Surahs finished yet. Keep going!")
+    st.subheader("📊 Permanent Progress")
+    df_prog = load_google_progress()
+    st.dataframe(df_prog, hide_index=True)
+    st.link_button("📝 Open Tracking Sheet", f"https://docs.google.com/spreadsheets/d/{SHEET_ID}")
 
-# --- MAIN INTERFACE ---
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📖 Quran", "🧠 Vocab", "💰 Zakat", "🥗 Recipes", "✨ Daily"])
+# --- MAIN APP INTERFACE ---
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📖 Quran", "🧠 Vocab", "💰 Zakat", "🥗 Food", "✨ Daily", "🌙 Moon"])
 
 with tab1:
-    st.header("Whole Quran Explorer")
-    surah_num = st.number_input("Select Surah (1-114):", 1, 114, 1)
+    st.header("Whole Quran & Audio Translation")
+    s_num = st.number_input("Select Surah (1-114):", 1, 114, 1)
     
-    if st.button("Load Surah & Audio"):
-        with st.spinner("Fetching Ayahs..."):
-            # Fetch Arabic and English editions
-            res = requests.get(f"https://api.alquran.cloud/v1/surah/{surah_num}/editions/quran-uthmani,en.sahih").json()
+    if st.button("Load Surah"):
+        with st.spinner("Connecting to API..."):
+            res = requests.get(f"https://api.alquran.cloud/v1/surah/{s_num}/editions/quran-uthmani,en.sahih").json()
             ar_data = res['data'][0]
             en_data = res['data'][1]
             
             st.subheader(f"{ar_data['name']} - {ar_data['englishName']}")
+            st.audio(f"https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/{s_num}.mp3")
             
-            # Audio Translation (Full Surah Recitation)
-            audio_url = f"https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/{surah_num}.mp3"
-            st.write("🔊 **Recitation by Mishary Rashid Alafasy:**")
-            st.audio(audio_url)
-            
-            if st.button("Mark Surah as Finished"):
-                save_progress(ar_data['englishName'])
-                st.success(f"Saved {ar_data['englishName']} to your progress!")
-
-            for ar_v, en_v in zip(ar_data['ayahs'], en_data['ayahs']):
-                st.markdown(f"<p class='arabic-text'>{ar_v['text']}</p>", unsafe_allow_html=True)
-                st.markdown(f"<p class='translation-text'>{en_v['text']}</p>", unsafe_allow_html=True)
-                st.divider()
+            for ar, en in zip(ar_data['ayahs'], en_data['ayahs']):
+                st.markdown(f"<p class='arabic-text'>{ar['text']}</p>", unsafe_allow_html=True)
+                st.markdown(f"<div class='translation-text'>{en['text']}</div>", unsafe_allow_html=True)
 
 with tab2:
     st.header("🧠 High-Frequency Quranic Vocabulary")
+    st.write("These words appear thousands of times. Learn these to understand 50% of the Quran!")
     vocabs = [
-        {"ar": "اللّه", "en": "Allah", "note": "2699 occurrences"},
-        {"ar": "رَبّ", "en": "Lord", "note": "975 occurrences"},
-        {"ar": "قُل", "en": "Say", "note": "332 occurrences"},
-        {"ar": "أَرْض", "en": "Earth", "note": "461 occurrences"},
-        {"ar": "عَلِيم", "en": "All-Knowing", "note": "158 occurrences"},
-        {"ar": "صَبْر", "en": "Patience", "note": "103 occurrences"}
+        {"ar": "اللّه", "en": "Allah", "frq": "2699x"},
+        {"ar": "رَبّ", "en": "Lord/Sustainer", "frq": "975x"},
+        {"ar": "قُل", "en": "Say", "frq": "332x"},
+        {"ar": "أَرْض", "en": "Earth", "frq": "461x"},
+        {"ar": "عَلِيم", "en": "All-Knowing", "frq": "158x"},
+        {"ar": "يَوْم", "en": "Day", "frq": "405x"}
     ]
-    cols = st.columns(2)
+    c1, c2 = st.columns(2)
     for idx, item in enumerate(vocabs):
-        with cols[idx % 2]:
-            st.markdown(f"""<div class='vocab-card'><h2>{item['ar']}</h2><h3>{item['en']}</h3><p>{item['note']}</p></div>""", unsafe_allow_html=True)
+        with (c1 if idx % 2 == 0 else c2):
+            st.markdown(f"<div class='vocab-card'><h2>{item['ar']}</h2><b>{item['en']}</b><br><small>{item['frq']}</small></div>", unsafe_allow_html=True)
 
 with tab3:
-    st.header("💰 Zakat Calculator (2026)")
-    total_assets = st.number_input("Enter Total Wealth (Gold, Cash, etc):", min_value=0.0)
-    if total_assets > 0:
-        zakat_due = total_assets * 0.025
-        st.balloons()
-        st.success(f"Your Zakat obligation is: **{zakat_due:,.2f}**")
+    st.header("💰 Zakat Calculator")
+    assets = st.number_input("Total Savings/Wealth:", min_value=0.0)
+    if assets > 0:
+        st.success(f"Zakat Due (2.5%): **{assets * 0.025:,.2f}**")
+        st.caption("Note: Zakat is only due if wealth is above the Nisab threshold.")
 
 with tab4:
-    st.header("🥗 Ramadan Nutrition")
+    st.header("🥗 Ramadan Nutrition Guide")
     col_suhoor, col_iftar = st.columns(2)
     with col_suhoor:
-        st.info("🌅 **Suhoor (Energy)**")
-        st.write("- **Oatmeal/Porridge:** Slow release energy.")
-        st.write("- **Healthy Fats:** Avocado or Peanut Butter.")
-        st.write("- **Hydration:** 2 glasses of water.")
+        st.info("🌅 **Suhoor (The Fuel)**")
+        st.write("1. **Slow Carbs:** Oats, Brown Rice, or Whole Wheat Bread.")
+        st.write("2. **Protein:** Eggs or Beans.")
+        st.write("3. **Hydration:** Drink 1L water slowly.")
     with col_iftar:
-        st.success("🌙 **Iftar (Recovery)**")
-        st.write("- **Dates:** Natural sugars for instant energy.")
-        st.write("- **Soup:** Rehydrates gently.")
-        st.write("- **Protein:** Chicken or Beans.")
+        st.success("🌙 **Iftar (The Recovery)**")
+        st.write("1. **Dates:** 3 pieces to restore blood sugar.")
+        st.write("2. **Soup:** Warm liquid to wake up the stomach.")
+        st.write("3. **Water:** Avoid sugary drinks immediately.")
 
 with tab5:
     st.header("✨ Verse of the Day")
-    if st.button("Surprise Me"):
-        rand = random.randint(1, 6236)
-        v = requests.get(f"https://api.alquran.cloud/v1/ayah/{rand}/editions/quran-uthmani,en.sahih").json()
+    if st.button("Generate Surprise Verse"):
+        r_num = random.randint(1, 6236)
+        v = requests.get(f"https://api.alquran.cloud/v1/ayah/{r_num}/editions/quran-uthmani,en.sahih").json()
         st.markdown(f"<p class='arabic-text'>{v['data'][0]['text']}</p>", unsafe_allow_html=True)
         st.info(f"**Meaning:** {v['data'][1]['text']}")
-        st.caption(f"Surah {v['data'][0]['surah']['englishName']}, Ayah {v['data'][0]['numberInSurah']}")
+        st.caption(f"Source: Surah {v['data'][0]['surah']['englishName']}, Ayah {v['data'][0]['numberInSurah']}")
+
+with tab6:
+    st.header("🌙 Moon Phase Tracker")
+    st.write("Keep track of the month's progress (Ramadan 2026).")
+    # A simple progress bar to visualize the 29-30 days
+    day_of_ramadan = st.slider("Current Day of Ramadan", 1, 30, 1)
+    st.progress(day_of_ramadan / 30)
+    st.write(f"You have completed **{int((day_of_ramadan/30)*100)}%** of the Holy Month!")
