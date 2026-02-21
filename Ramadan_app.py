@@ -1,504 +1,181 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Streamlit Quran Companion App
---------------------------------
-- Fetches full Quran from AlQuran.cloud (Arabic + English)
-- Random verse of the day with audio
-- Prayer times (Aladhan API)
-- Zakat calculator
-- Ramadan recipes
-- Vocabulary builder with audio
-- Progress tracker (local JSON + optional Google Sheets sync)
-- Daily Suhoor reminder via IFTTT (user configurable)
-- Moon phase & Ramadan progress bar
-"""
-
 import streamlit as st
 import requests
-import json
-import os
-import datetime
-import math
 import random
-import time
-from io import BytesIO
-from pathlib import Path
+import pandas as pd
+from datetime import datetime
 
-# Optional imports (graceful fallback)
-try:
-    from gtts import gTTS
-    GTTS_AVAILABLE = True
-except ImportError:
-    GTTS_AVAILABLE = False
-    st.warning("⚠️ gTTS not installed. Audio features disabled. Run: pip install gtts")
+# --- 1. APP CONFIGURATION ---
+st.set_page_config(page_title="Islam & Ramadan Hub 2026", page_icon="🌙", layout="wide")
 
-try:
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
-    GSHEETS_AVAILABLE = True
-except ImportError:
-    GSHEETS_AVAILABLE = False
-    st.warning("⚠️ gspread/oauth2client not installed. Google Sheets sync disabled.")
+# --- 2. USER SETTINGS (GOOGLE SHEETS) ---
+SHEET_ID = "YOUR_SHEET_ID_HERE" 
+SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv"
 
-# ------------------------------
-# Configuration
-# ------------------------------
-st.set_page_config(
-    page_title="Quran Companion",
-    page_icon="🕌",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# --- 3. CUSTOM STYLING ---
+st.markdown("""
+    <style>
+    .arabic-text { font-family: 'Amiri', serif; font-size: 34px; direction: rtl; text-align: right; color: #1B5E20; line-height: 2.2; }
+    .translation-text { font-size: 18px; color: #444; margin-bottom: 25px; border-left: 3px solid #eee; padding-left: 15px; }
+    .card { background-color: #fdfdfd; padding: 20px; border-radius: 10px; border-left: 5px solid #00796B; margin-bottom: 20px; box-shadow: 2px 2px 10px rgba(0,0,0,0.05); }
+    .prayer-card { background-color: #e8f5e9; padding: 12px; border-radius: 8px; border-right: 5px solid #2E7D32; margin-bottom: 8px; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# Constants
-DEFAULT_CITY = "Mecca"
-DEFAULT_COUNTRY = "Saudi Arabia"
-
-# Ramadan dates (adjust as needed)
-RAMADAN_START = datetime.date(2025, 3, 1)
-RAMADAN_END = datetime.date(2025, 3, 30)
-
-# IFTTT webhook template (user must replace with their own key)
-IFTTT_WEBHOOK_URL = "https://maker.ifttt.com/trigger/{event}/with/key/{key}"
-
-# Vocabulary list (Arabic words with translations)
-VOCAB = [
-    {"arabic": "الرَّحْمَٰنِ", "translation": "The Most Gracious", "example": "Ar-Rahman – a name of Allah."},
-    {"arabic": "الرَّحِيمِ", "translation": "The Most Merciful", "example": "Ar-Raheem – a name of Allah."},
-    {"arabic": "الْحَمْدُ", "translation": "Praise", "example": "Alhamdu lillah (All praise is due to Allah)."},
-    {"arabic": "رَبِّ", "translation": "Lord", "example": "Rabb al-'alameen (Lord of the worlds)."},
-    {"arabic": "مَالِكِ", "translation": "Master/Owner", "example": "Maliki yawm ad-deen (Master of the Day of Judgment)."},
-]
-
-# Ramadan recipes (static)
-RECIPES = [
-    {"name": "Dates Milkshake", "ingredients": "Dates, milk, ice, cardamom", "instructions": "Blend all until smooth."},
-    {"name": "Lentil Soup", "ingredients": "Lentils, onion, carrot, spices", "instructions": "Cook lentils with vegetables and spices."},
-    {"name": "Samosa", "ingredients": "Potatoes, peas, spices, pastry sheets", "instructions": "Fill pastry with spiced potatoes and deep fry."},
-]
-
-# ------------------------------
-# Cached API functions
-# ------------------------------
-@st.cache_data(ttl=3600)  # Cache for 1 hour
-def get_surah_list():
-    """Fetch list of all surahs from AlQuran.cloud."""
-    url = "http://api.alquran.cloud/v1/surah"
-    try:
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        if data["code"] == 200:
-            return data["data"]
-    except Exception as e:
-        st.error(f"Failed to fetch surah list: {e}")
-    return []
-
+# --- 4. HELPER FUNCTIONS ---
 @st.cache_data(ttl=3600)
-def get_surah_with_translation(surah_number):
-    """Fetch Arabic verses and English translation for a surah."""
-    ar_url = f"http://api.alquran.cloud/v1/surah/{surah_number}"
-    en_url = f"http://api.alquran.cloud/v1/surah/{surah_number}/en.sahih"
+def get_prayer_times(city):
     try:
-        ar_resp = requests.get(ar_url, timeout=10)
-        en_resp = requests.get(en_url, timeout=10)
-        if ar_resp.status_code == 200 and en_resp.status_code == 200:
-            ar_data = ar_resp.json()["data"]
-            en_data = en_resp.json()["data"]
-            verses = []
-            for i, ar_verse in enumerate(ar_data["ayahs"]):
-                verses.append({
-                    "arabic": ar_verse["text"],
-                    "translation": en_data["ayahs"][i]["text"],
-                    "number": ar_verse["numberInSurah"]
-                })
-            return {
-                "name": ar_data["englishName"],
-                "number": surah_number,
-                "verses": verses
-            }
-    except Exception as e:
-        st.error(f"Failed to fetch surah {surah_number}: {e}")
-    return None
-
-def get_random_verse():
-    """Fetch a random verse from the Quran."""
-    surah_list = get_surah_list()
-    if not surah_list:
-        return None
-    surah = random.choice(surah_list)
-    surah_data = get_surah_with_translation(surah["number"])
-    if not surah_data or not surah_data["verses"]:
-        return None
-    verse = random.choice(surah_data["verses"])
-    return {
-        "surah": surah_data["name"],
-        "arabic": verse["arabic"],
-        "translation": verse["translation"],
-        "verse_number": verse["number"]
-    }
-
-def get_prayer_times(city, country):
-    """Fetch prayer times from Aladhan API."""
-    today = datetime.date.today().strftime("%d-%m-%Y")
-    url = f"http://api.aladhan.com/v1/timingsByCity/{today}?city={city}&country={country}&method=2"
-    try:
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        if data["code"] == 200:
-            return data["data"]["timings"]
-    except Exception as e:
-        st.error(f"Prayer times error: {e}")
-    return None
-
-# ------------------------------
-# Audio helper
-# ------------------------------
-def text_to_audio(text, lang='en'):
-    """Convert text to audio bytes (MP3). Returns bytes or None."""
-    if not GTTS_AVAILABLE:
-        return None
-    try:
-        tts = gTTS(text=text, lang=lang)
-        fp = BytesIO()
-        tts.write_to_fp(fp)
-        fp.seek(0)
-        return fp.read()
-    except Exception as e:
-        st.error(f"Audio generation failed: {e}")
-        return None
-
-# ------------------------------
-# Progress persistence (local JSON)
-# ------------------------------
-PROGRESS_FILE = "progress.json"
+        # Defaults to Sierra Leone based on your location
+        res = requests.get(f"https://api.aladhan.com/v1/timingsByCity?city={city}&country=Sierra%20Leone&method=2").json()
+        return res['data']['timings']
+    except: return None
 
 def load_progress():
-    if os.path.exists(PROGRESS_FILE):
+    try: return pd.read_csv(SHEET_URL)
+    except: return pd.DataFrame(columns=["Surah", "Date"])
+
+# --- 5. SIDEBAR: HUB & IFTTT ALERTS ---
+with st.sidebar:
+    st.title("🕌 My Deen Center")
+    city = st.text_input("City", "Kabala")
+    times = get_prayer_times(city)
+    
+    if times:
+        st.subheader(f"📅 Prayer Times ({city})")
+        st.markdown(f"<div class='prayer-card'>🌅 <b>Fajr (Suhoor Ends):</b> {times['Fajr']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='prayer-card'>☀️ <b>Dhuhr:</b> {times['Dhuhr']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='prayer-card'>🌥️ <b>Asr:</b> {times['Asr']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='prayer-card' style='background-color:#fff3e0;'>🌙 <b>Maghrib (Iftar):</b> {times['Maghrib']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='prayer-card'>🌌 <b>Isha:</b> {times['Isha']}</div>", unsafe_allow_html=True)
+        
+        st.warning(f"🔔 **Daily Goal & IFTTT Alert:** Set your phone alarm to **{times['Fajr']}** to wake up for Suhoor and read your daily verse!")
+
+    st.divider()
+    st.subheader("📊 Permanent Tracker")
+    st.dataframe(load_progress(), hide_index=True)
+    st.link_button("📝 Save to Google Sheet", f"https://docs.google.com/spreadsheets/d/{SHEET_ID}")
+
+# --- 6. MAIN APP TABS ---
+tabs = st.tabs([
+    "📖 Quran & Audio", 
+    "📜 History & Sunnah", 
+    "🌙 Ramadan Guide", 
+    "🥗 Recipes & Zakat", 
+    "🧠 Vocab Builder", 
+    "✨ Daily & Moon"
+])
+
+# --- TAB 1: QURAN ---
+with tabs[0]:
+    st.header("Whole Quran & Recitation")
+    s_num = st.number_input("Select Surah (1-114):", 1, 114, 1)
+    if st.button("Load Surah"):
+        with st.spinner("Loading verses and audio..."):
+            try:
+                res = requests.get(f"https://api.alquran.cloud/v1/surah/{s_num}/editions/quran-uthmani,en.sahih").json()
+                st.subheader(f"{res['data'][0]['name']} - {res['data'][0]['englishName']}")
+                # Full Surah Audio
+                st.audio(f"https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/{s_num}.mp3")
+                
+                for ar, en in zip(res['data'][0]['ayahs'], res['data'][1]['ayahs']):
+                    st.markdown(f"<p class='arabic-text'>{ar['text']}</p>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='translation-text'>{en['text']}</div>", unsafe_allow_html=True)
+            except:
+                st.error("Could not connect to the Quran API. Check your internet.")
+
+# --- TAB 2: HISTORY & SUNNAH ---
+with tabs[1]:
+    st.header("📜 The Complete History of Islam")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("""<div class='card'><h3>The Origins (7th Century)</h3>
+        Islam was revealed to the <b>Prophet Muhammad (PBUH)</b> in 610 CE in the Cave of Hira, near Mecca. Over 23 years, the Quran was revealed through the Angel Jibril (Gabriel). It unified the Arabian Peninsula under the worship of One God (Tawhid).</div>""", unsafe_allow_html=True)
+    with c2:
+        st.markdown("""<div class='card'><h3>The Golden Age</h3>
+        Following the Prophet's passing, Islam spread rapidly. During the Abbasid Caliphate (8th-13th century), Islamic scholars preserved ancient knowledge and made massive leaps in algebra, medicine, astronomy, and architecture.</div>""", unsafe_allow_html=True)
+
+    st.divider()
+    st.header("📖 Sunnah of the Prophet (Hadith)")
+    hadiths = [
+        "**On Fasting:** 'Whoever fasts Ramadan out of faith and in the hope of reward, his previous sins will be forgiven.' (Sahih Al-Bukhari)",
+        "**On Character:** 'The best among you are those who have the best manners and character.' (Sahih Al-Bukhari)",
+        "**On Charity:** 'Charity does not decrease wealth.' (Sahih Muslim)"
+    ]
+    for h in hadiths:
+        st.info(h)
+
+# --- TAB 3: RAMADAN GUIDE ---
+with tabs[2]:
+    st.header("🌙 Everything About Ramadan")
+    st.write("Ramadan is the 9th month of the Islamic lunar calendar. It is a time for physical purification, intense worship, and community.")
+    
+    st.markdown("""<div class='card'><h3>The Rules of Fasting (Sawm)</h3>
+    <ul>
+        <li><b>Niyyah (Intention):</b> You must silently intend to fast before dawn.</li>
+        <li><b>Imsak:</b> Absolute restriction from food, drink (including water), and intimacy from Fajr (dawn) to Maghrib (sunset).</li>
+        <li><b>Behavior:</b> Arguing, lying, and swearing diminish the spiritual reward of the fast.</li>
+    </ul>
+    </div>""", unsafe_allow_html=True)
+    
+    st.markdown("""<div class='card'><h3>Exemptions (Who doesn't have to fast)</h3>
+    Children, the elderly, those who are chronically ill, pregnant/nursing women, women on their menstrual cycle, and travelers. Missed fasts are made up later, or compensated via <i>Fidyah</i> (feeding the poor).</div>""", unsafe_allow_html=True)
+
+# --- TAB 4: RECIPES & ZAKAT ---
+with tabs[3]:
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("🥗 Ramadan Recipes (Kabala Style)")
+        st.info("🌅 **Suhoor (Pre-Dawn):**\n* Oatmeal with bananas and honey.\n* Boiled eggs for protein.\n* At least 2 glasses of water.")
+        st.success("🌙 **Iftar (Sunset):**\n* 3 Dates and water (Sunnah).\n* Light soup or broth to warm the stomach.\n* Grilled chicken or fish with rice.")
+    with col_b:
+        st.subheader("💰 Zakat Calculator")
+        st.write("Zakat is 2.5% of excess wealth held for a full lunar year.")
+        assets = st.number_input("Total Savings/Gold Value:", min_value=0.0)
+        if assets > 0:
+            st.success(f"**Your Zakat Due:** {assets * 0.025:,.2f}")
+
+# --- TAB 5: VOCABULARY BUILDER ---
+with tabs[4]:
+    st.header("🧠 Quranic Vocabulary & Audio")
+    st.write("Learn these high-frequency words to understand the Quran faster.")
+    
+    vocab = [
+        {"ar": "صَبْر", "en": "Sabr (Patience)", "url": "https://everyayah.com/data/Arabic_Words/002153.mp3"},
+        {"ar": "رَحْمَة", "en": "Rahma (Mercy)", "url": "https://everyayah.com/data/Arabic_Words/001001.mp3"},
+        {"ar": "عَلِيم", "en": "Aleem (All-Knowing)", "url": "https://everyayah.com/data/Arabic_Words/002032.mp3"},
+        {"ar": "أَرْض", "en": "Ardh (Earth)", "url": "https://everyayah.com/data/Arabic_Words/002011.mp3"}
+    ]
+    
+    for v in vocab:
+        c1, c2, c3 = st.columns([1, 2, 2])
+        c1.subheader(v['ar'])
+        c2.write(f"**{v['en']}**")
+        with c3:
+            st.audio(v['url'])
+
+# --- TAB 6: DAILY VERSE & MOON PHASE ---
+with tabs[5]:
+    st.header("✨ Daily Surprise Verse")
+    if st.button("Get Random Ayah"):
         try:
-            with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            r = random.randint(1, 6236)
+            v = requests.get(f"https://api.alquran.cloud/v1/ayah/{r}/editions/quran-uthmani,en.sahih").json()
+            st.markdown(f"<p class='arabic-text'>{v['data'][0]['text']}</p>", unsafe_allow_html=True)
+            st.info(f"**Meaning:** {v['data'][1]['text']}")
+            st.caption(f"Surah {v['data'][0]['surah']['englishName']}, Ayah {v['data'][0]['numberInSurah']}")
         except:
-            return {"read_surahs": []}
+            st.error("Error fetching verse. Please try again.")
+
+    st.divider()
+    st.header("🌙 Ramadan Moon & Progress Tracker")
+    st.write("Track the phases of the moon to see how close you are to Eid al-Fitr!")
+    
+    day = st.slider("Current Day of Ramadan", 1, 30, 1)
+    st.progress(day / 30)
+    
+    if day < 10:
+        st.write("🌒 **First 10 Days:** The Days of Mercy (Rahmah).")
+    elif day < 20:
+        st.write("🌓 **Middle 10 Days:** The Days of Forgiveness (Maghfirah).")
     else:
-        return {"read_surahs": []}
-
-def save_progress(progress):
-    try:
-        with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(progress, f, indent=2)
-    except Exception as e:
-        st.error(f"Failed to save progress: {e}")
-
-# ------------------------------
-# Google Sheets sync (optional)
-# ------------------------------
-def sync_to_google_sheets(progress):
-    """Sync read surahs to a Google Sheet (requires credentials.json)."""
-    if not GSHEETS_AVAILABLE:
-        st.error("gspread not installed.")
-        return False
-    if not os.path.exists("credentials.json"):
-        st.error("credentials.json not found in current directory.")
-        return False
-    try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-        client = gspread.authorize(creds)
-        sheet = client.open("QuranProgress").sheet1
-        # Write read surahs as comma-separated list in cell A1
-        sheet.update('A1', [[','.join(progress.get('read_surahs', []))]])
-        return True
-    except Exception as e:
-        st.error(f"Google Sheets sync failed: {e}")
-        return False
-
-# ------------------------------
-# IFTTT reminder trigger
-# ------------------------------
-def trigger_ifttt(event, key, value1=None, value2=None, value3=None):
-    url = IFTTT_WEBHOOK_URL.format(event=event, key=key)
-    payload = {}
-    if value1:
-        payload["value1"] = value1
-    if value2:
-        payload["value2"] = value2
-    if value3:
-        payload["value3"] = value3
-    try:
-        requests.post(url, data=payload, timeout=10)
-        return True
-    except Exception as e:
-        st.error(f"IFTTT trigger failed: {e}")
-        return False
-
-# ------------------------------
-# Moon phase helper
-# ------------------------------
-def moon_phase(date=None):
-    """Approximate moon phase (0=new, 0.5=full)."""
-    if date is None:
-        date = datetime.date.today()
-    known_new_moon = datetime.date(2000, 1, 6)
-    diff = (date - known_new_moon).days
-    lunations = diff / 29.53058867
-    phase = lunations - math.floor(lunations)
-    return phase
-
-# ------------------------------
-# Main app
-# ------------------------------
-def main():
-    st.sidebar.title("🌙 Quran Companion")
-    menu = st.sidebar.radio(
-        "Navigate",
-        ["🏠 Home (Random Verse)",
-         "📖 Quran Reader",
-         "🕋 Prayer Times",
-         "💰 Zakat Calculator",
-         "🍽️ Ramadan Recipes",
-         "📚 Vocabulary Builder",
-         "📊 Progress Tracker",
-         "🌒 Moon & Ramadan"]
-    )
-
-    # Sidebar: IFTTT setup (optional)
-    with st.sidebar.expander("🔔 Daily Suhoor Reminder (IFTTT)"):
-        st.markdown("""
-        Get a notification on your phone every morning at Suhoor time.
-        1. Create an IFTTT applet with **Webhook** trigger.
-        2. Use event name: `suhoor_reminder`.
-        3. Enter your IFTTT key below.
-        """)
-        ifttt_key = st.text_input("IFTTT Key", type="password")
-        if st.button("Test Reminder Now"):
-            if ifttt_key:
-                if trigger_ifttt("suhoor_reminder", ifttt_key, "Suhoor time! Don't forget your intention."):
-                    st.success("✅ Trigger sent!")
-                else:
-                    st.error("❌ Failed. Check key and internet.")
-            else:
-                st.warning("Please enter your IFTTT key.")
-
-    # ------------------------------
-    # Home: Random Verse
-    # ------------------------------
-    if menu == "🏠 Home (Random Verse)":
-        st.header("✨ Random Verse of the Day")
-        if st.button("Get New Random Verse"):
-            with st.spinner("Fetching a verse..."):
-                verse = get_random_verse()
-                if verse:
-                    st.session_state["random_verse"] = verse
-                else:
-                    st.error("Could not fetch verse. Please check your internet connection.")
-        
-        if "random_verse" in st.session_state:
-            v = st.session_state["random_verse"]
-            st.markdown(f"**Surah {v['surah']} (Verse {v['verse_number']})**")
-            st.markdown(f"<h2 style='text-align: right; font-size: 28px;'>{v['arabic']}</h2>", unsafe_allow_html=True)
-            st.markdown(f"*{v['translation']}*")
-            
-            # Audio buttons
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🔊 Play Translation (English)"):
-                    audio = text_to_audio(v['translation'], lang='en')
-                    if audio:
-                        st.audio(audio, format='audio/mp3')
-                    else:
-                        st.warning("Audio not available (gTTS missing or error).")
-            with col2:
-                if st.button("🔊 Play Arabic (experimental)"):
-                    audio = text_to_audio(v['arabic'], lang='ar')
-                    if audio:
-                        st.audio(audio, format='audio/mp3')
-                    else:
-                        st.warning("Arabic audio may not be accurate.")
-        else:
-            st.info("Click the button to get a random verse.")
-
-    # ------------------------------
-    # Quran Reader
-    # ------------------------------
-    elif menu == "📖 Quran Reader":
-        st.header("📖 Quran Reader")
-        surah_list = get_surah_list()
-        if not surah_list:
-            st.error("Failed to load surah list. Please check your internet connection.")
-            return
-        
-        # Create selection box
-        surah_names = [f"{s['number']}. {s['englishName']} ({s['name']})" for s in surah_list]
-        selected = st.selectbox("Select Surah", surah_names, key="surah_selector")
-        surah_number = int(selected.split('.')[0])
-        
-        if st.button("Load Surah"):
-            with st.spinner("Loading verses..."):
-                surah_data = get_surah_with_translation(surah_number)
-                if surah_data:
-                    st.session_state["current_surah"] = surah_data
-                else:
-                    st.error("Failed to load surah.")
-        
-        if "current_surah" in st.session_state and st.session_state["current_surah"]["number"] == surah_number:
-            surah = st.session_state["current_surah"]
-            st.subheader(f"Surah {surah['name']}")
-            
-            # Display verses
-            for verse in surah["verses"]:
-                with st.expander(f"Verse {verse['number']}"):
-                    st.markdown(f"<p style='font-size:24px; text-align:right;'>{verse['arabic']}</p>", unsafe_allow_html=True)
-                    st.markdown(f"*{verse['translation']}*")
-                    if st.button(f"🔊 Play Verse {verse['number']}", key=f"play_q_{verse['number']}"):
-                        audio = text_to_audio(verse['translation'], lang='en')
-                        if audio:
-                            st.audio(audio, format='audio/mp3')
-            
-            # Mark as read
-            surah_name_for_progress = surah['name']
-            progress = load_progress()
-            if surah_name_for_progress not in progress["read_surahs"]:
-                if st.button("✅ Mark this Surah as Read"):
-                    progress["read_surahs"].append(surah_name_for_progress)
-                    save_progress(progress)
-                    st.success(f"Marked {surah_name_for_progress} as read.")
-            else:
-                st.info("You have already marked this surah as read.")
-
-    # ------------------------------
-    # Prayer Times
-    # ------------------------------
-    elif menu == "🕋 Prayer Times":
-        st.header("🕋 Prayer Times")
-        col1, col2 = st.columns(2)
-        with col1:
-            city = st.text_input("City", value=DEFAULT_CITY)
-        with col2:
-            country = st.text_input("Country", value=DEFAULT_COUNTRY)
-        
-        if st.button("Get Today's Prayer Times"):
-            with st.spinner("Fetching..."):
-                timings = get_prayer_times(city, country)
-                if timings:
-                    st.success(f"Prayer times for {city}, {country} on {datetime.date.today().strftime('%d %B %Y')}:")
-                    # Display in a clean table
-                    for name, time_str in timings.items():
-                        st.write(f"**{name}:** {time_str}")
-                else:
-                    st.error("Could not fetch prayer times. Check city/country or try again later.")
-
-    # ------------------------------
-    # Zakat Calculator
-    # ------------------------------
-    elif menu == "💰 Zakat Calculator":
-        st.header("💰 Zakat Calculator (2.5%)")
-        wealth = st.number_input("Total Wealth (in USD)", min_value=0.0, step=100.0, value=10000.0)
-        if st.button("Calculate Zakat"):
-            zakat = wealth * 0.025
-            st.success(f"Zakat due: **${zakat:,.2f}**")
-
-    # ------------------------------
-    # Ramadan Recipes
-    # ------------------------------
-    elif menu == "🍽️ Ramadan Recipes":
-        st.header("🍽️ Ramadan Recipes")
-        for recipe in RECIPES:
-            with st.expander(recipe["name"]):
-                st.markdown(f"**Ingredients:** {recipe['ingredients']}")
-                st.markdown(f"**Instructions:** {recipe['instructions']}")
-
-    # ------------------------------
-    # Vocabulary Builder
-    # ------------------------------
-    elif menu == "📚 Vocabulary Builder":
-        st.header("📚 Quranic Vocabulary Builder")
-        for word in VOCAB:
-            with st.expander(word["arabic"]):
-                st.markdown(f"**Translation:** {word['translation']}")
-                st.markdown(f"**Example:** {word['example']}")
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button(f"🔊 Hear Arabic", key=f"ar_{word['arabic']}"):
-                        audio = text_to_audio(word['arabic'], lang='ar')
-                        if audio:
-                            st.audio(audio, format='audio/mp3')
-                        else:
-                            st.warning("Audio unavailable.")
-                with col2:
-                    if st.button(f"🔊 Hear Meaning", key=f"en_{word['arabic']}"):
-                        audio = text_to_audio(f"{word['arabic']} means {word['translation']}", lang='en')
-                        if audio:
-                            st.audio(audio, format='audio/mp3')
-
-    # ------------------------------
-    # Progress Tracker
-    # ------------------------------
-    elif menu == "📊 Progress Tracker":
-        st.header("📊 Your Reading Progress")
-        progress = load_progress()
-        read_surahs = progress.get("read_surahs", [])
-        
-        if read_surahs:
-            st.write("✅ Surahs you've marked as read:")
-            for surah in read_surahs:
-                st.write(f"- {surah}")
-        else:
-            st.info("No surahs marked as read yet. Go to the Quran Reader tab and start reading!")
-        
-        # Google Sheets sync
-        if st.button("☁️ Sync with Google Sheets"):
-            if sync_to_google_sheets(progress):
-                st.success("Progress synced successfully!")
-            else:
-                st.error("Sync failed. Check credentials and sheet name.")
-        
-        # Reset local progress
-        if st.button("🔄 Reset Local Progress"):
-            save_progress({"read_surahs": []})
-            st.success("Local progress reset.")
-            st.rerun()
-
-    # ------------------------------
-    # Moon & Ramadan Progress
-    # ------------------------------
-    elif menu == "🌒 Moon & Ramadan":
-        st.header("🌒 Moon Phase & Ramadan Progress")
-        
-        # Moon phase
-        phase = moon_phase()
-        phase_names = ["New Moon", "Waxing Crescent", "First Quarter", "Waxing Gibbous",
-                       "Full Moon", "Waning Gibbous", "Last Quarter", "Waning Crescent"]
-        idx = int(phase * 8) % 8
-        st.metric("Current Moon Phase", phase_names[idx])
-        
-        # Ramadan progress
-        today = datetime.date.today()
-        total_days = (RAMADAN_END - RAMADAN_START).days + 1
-        passed_days = (today - RAMADAN_START).days
-        if passed_days < 0:
-            passed_days = 0
-            st.info("Ramadan hasn't started yet.")
-        elif passed_days > total_days:
-            passed_days = total_days
-            st.info("Ramadan has ended. Eid Mubarak! 🎉")
-        
-        progress_value = passed_days / total_days if total_days > 0 else 0
-        st.progress(progress_value)
-        st.write(f"📅 Ramadan: **{passed_days}** days passed, **{total_days - passed_days}** days until Eid.")
-
-    # ------------------------------
-    # Footer with credits
-    # ------------------------------
-    st.sidebar.markdown("---")
-    st.sidebar.info(
-        "**Data sources:**\n"
-        "- Quran: [AlQuran.cloud](https://alquran.cloud)\n"
-        "- Prayer times: [Aladhan.com](https://aladhan.com)\n"
-        "- Audio: gTTS\n\n"
-        "Built with ❤️ using Streamlit"
-    )
-
-if __name__ == "__main__":
-    main()
+        st.write("🌕 **Last 10 Days:** Seeking Refuge from the Fire, and searching for Laylat al-Qadr!")
